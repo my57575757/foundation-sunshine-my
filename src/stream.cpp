@@ -372,6 +372,18 @@ namespace stream {
     std::uint32_t ssrc;
   };
 
+  // 改版客户端 /mic-uplink 协商后的 UDP 包头，全部大端序
+  struct mic_uplink_packet_t {
+    std::uint32_t session_id;
+    std::uint32_t sequence;
+    std::uint32_t timestamp;  // 48 kHz 采样计数
+    std::uint8_t token[16];
+    std::uint8_t payload_type;
+    std::uint8_t reserved;
+    std::uint16_t payload_size;
+  };
+  static_assert(sizeof(mic_uplink_packet_t) == 32);
+
 #pragma pack(pop)
 
   constexpr std::size_t
@@ -554,17 +566,20 @@ namespace stream {
       boost::asio::ip::address client_address;
       std::optional<udp::endpoint> source_endpoint;
       std::optional<mic_cipher_ctx_t> cipher;
+      std::optional<std::array<std::uint8_t, 16>> expected_token;
 
       mic_session_ctx_t(
         std::uint32_t session_id,
         std::uint32_t key_id,
         boost::asio::ip::address client_address,
-        std::optional<mic_cipher_ctx_t> cipher
+        std::optional<mic_cipher_ctx_t> cipher,
+        std::optional<std::array<std::uint8_t, 16>> expected_token = std::nullopt
       ):
           session_id {session_id},
           key_id {key_id},
           client_address {net::normalize_address(std::move(client_address))},
-          cipher {std::move(cipher)} {}
+          cipher {std::move(cipher)},
+          expected_token {std::move(expected_token)} {}
     };
 
     // 每个会话保留独立的加密与 Opus 解码状态，麦克风线程将所有活动源混合后
@@ -1036,6 +1051,89 @@ namespace stream {
   }
 
   static auto broadcast_shared = safe::make_shared<broadcast_ctx_t>(start_broadcast, end_broadcast);
+
+  namespace session {
+    external_mic_result_t
+    enable_external_mic(
+      std::string_view client_uuid,
+      const boost::asio::ip::address &client_address,
+      const std::array<std::uint8_t, 16> &token) {
+      if (!config::audio.stream_mic) {
+        return {};
+      }
+
+      auto bref = broadcast_shared.try_ref();
+      if (!bref) {
+        return {};
+      }
+
+      session_t *target = nullptr;
+      // 持有 _sessions 锁直到注册完成：会话只能在该锁保护下从列表移除，
+      // 因此此处 target 不会在注册期间被释放。锁序 _sessions → mic_session → mic_socket。
+      auto sessions_lock = bref->control_server._sessions.lock();
+      for (auto session_p : *bref->control_server._sessions) {
+        if (session_p->client_cert_uuid == client_uuid &&
+            !session_p->control_only &&
+            session_p->lifecycle.state() == state_e::RUNNING) {
+          if (target == nullptr || session_p->launch_session_id > target->launch_session_id) {
+            target = session_p;
+          }
+        }
+      }
+
+      if (target == nullptr) {
+        return {};
+      }
+
+      auto &ctx = *bref.get();
+      const auto session_id = target->launch_session_id;
+      bool inserted = false;
+      {
+        boost::lock_guard<boost::mutex> session_lock(ctx.mic_session_mutex);
+        boost::lock_guard<boost::mutex> socket_lock(ctx.mic_socket_mutex);
+
+        auto existing = ctx.mic_sessions.find(session_id);
+        if (existing != ctx.mic_sessions.end()) {
+          existing->second->expected_token = token;
+        }
+        else {
+          if (!open_mic_socket_locked(ctx)) {
+            BOOST_LOG(error) << "Failed to open microphone socket for session " << session_id;
+            return {};
+          }
+
+          auto registration = boost::make_shared<broadcast_ctx_t::mic_session_ctx_t>(
+            session_id,
+            0,
+            client_address,
+            std::optional<broadcast_ctx_t::mic_cipher_ctx_t> {},
+            token);
+
+          inserted = true;
+          target->audio.mic_registered = true;
+          ctx.mic_sessions[session_id] = std::move(registration);
+          ctx.mic_session_count.store(
+            static_cast<std::uint32_t>(ctx.mic_sessions.size()),
+            boost::memory_order_release);
+        }
+      }
+
+      if (target->lifecycle.state() != state_e::RUNNING) {
+        if (inserted) {
+          release_mic_session(ctx, session_id);
+          target->audio.mic_registered = false;
+        }
+        return {};
+      }
+
+      BOOST_LOG(info) << "External mic-uplink registered for session " << session_id;
+      return {
+        true,
+        session_id,
+        static_cast<std::uint16_t>(net::map_port(stream::MIC_STREAM_PORT))
+      };
+    }
+  }  // namespace session
 
   session_t *
   control_server_t::get_session(const net::peer_t peer, uint32_t connect_data) {
@@ -2666,6 +2764,11 @@ namespace stream {
       uint64_t unregistered = 0;
       uint64_t route_ambiguous = 0;
       uint64_t wasapi_backpressure_drops = 0;
+      uint64_t uplink_shape_hits = 0;
+      uint64_t uplink_token_rejected = 0;
+      uint64_t mix_frames = 0;
+      uint64_t non_silent_frames = 0;
+      int max_sample_abs = 0;
     };
     MicStats stats;
 
@@ -2699,7 +2802,12 @@ namespace stream {
                       << ", plc="sv << mixer_stats.plc_frames
                       << ", opus_decode_failed="sv << mixer_stats.decode_failures
                       << ", skipped_slots="sv << mixer_stats.skipped_playout_frames
-                      << ", wasapi_drops="sv << stats.wasapi_backpressure_drops;
+                      << ", wasapi_drops="sv << stats.wasapi_backpressure_drops
+                      << ", uplink_hits="sv << stats.uplink_shape_hits
+                      << ", uplink_rejected="sv << stats.uplink_token_rejected
+                      << ", mix_frames="sv << stats.mix_frames
+                      << ", non_silent="sv << stats.non_silent_frames
+                      << ", max_amp="sv << stats.max_sample_abs;
       stats = {};
     };
 
@@ -2749,12 +2857,17 @@ namespace stream {
                                   std::uint16_t sequence_number,
                                   std::optional<std::uint32_t> timestamp_ms,
                                   std::uint32_t source_key_id,
-                                  const udp::endpoint &source_endpoint) {
+                                  const udp::endpoint &source_endpoint,
+                                  const std::array<std::uint8_t, 16> *provided_token = nullptr,
+                                  std::optional<std::uint32_t> exact_session_id = std::nullopt) {
       if (!ctx.mic_socket_enabled.load()) {
         return;
       }
 
       ++stats.total_packets;
+      if (stats.total_packets % 500 == 0) {
+        log_mic_stats("periodic"sv);
+      }
 
       const auto source_address = net::normalize_address(source_endpoint.address());
       std::vector<boost::shared_ptr<broadcast_ctx_t::mic_session_ctx_t>> candidates;
@@ -2762,7 +2875,13 @@ namespace stream {
         boost::lock_guard<boost::mutex> lock(ctx.mic_session_mutex);
         for (const auto &[session_id, session] : ctx.mic_sessions) {
           (void) session_id;
-          if (session->client_address == source_address) {
+          if (provided_token == nullptr) {
+            if (!session->expected_token && session->client_address == source_address) {
+              candidates.emplace_back(session);
+            }
+          }
+          else if (session->expected_token && *session->expected_token == *provided_token &&
+                   (!exact_session_id || session->session_id == *exact_session_id)) {
             candidates.emplace_back(session);
           }
         }
@@ -3005,6 +3124,51 @@ namespace stream {
         return;
       }
 
+      // /mic-uplink 改版客户端的 32 字节大端头。RTP 包长度也可能达到 32 字节，
+      // 因此只有形状匹配且 token+sessionId 精确命中已注册会话时才走此路径。
+      if (received_bytes >= sizeof(mic_uplink_packet_t)) {
+        auto *uplink = reinterpret_cast<const mic_uplink_packet_t *>(mic_recv_buffer.data());
+        const auto uplink_session_id = util::endian::big(uplink->session_id);
+        const auto uplink_sequence = util::endian::big(uplink->sequence);
+        const auto uplink_timestamp = util::endian::big(uplink->timestamp);
+        const auto uplink_payload_size = util::endian::big(uplink->payload_size);
+
+        if (uplink->payload_type == 1 && uplink_payload_size > 0 &&
+            uplink_payload_size == received_bytes - sizeof(mic_uplink_packet_t)) {
+          ++stats.uplink_shape_hits;
+          std::array<std::uint8_t, 16> uplink_token;
+          std::memcpy(uplink_token.data(), uplink->token, uplink_token.size());
+
+          bool token_known = false;
+          {
+            boost::lock_guard<boost::mutex> lock(ctx.mic_session_mutex);
+            for (const auto &[id, session] : ctx.mic_sessions) {
+              (void) id;
+              if (session->session_id == uplink_session_id &&
+                  session->expected_token &&
+                  *session->expected_token == uplink_token) {
+                token_known = true;
+                break;
+              }
+            }
+          }
+
+          if (token_known) {
+            process_audio_data(
+              reinterpret_cast<const std::uint8_t *>(mic_recv_buffer.data()) + sizeof(mic_uplink_packet_t),
+              uplink_payload_size,
+              static_cast<std::uint16_t>(uplink_sequence),
+              uplink_timestamp / 48,
+              MIC_PACKET_MAGIC,
+              peer,
+              &uplink_token,
+              uplink_session_id);
+            return;
+          }
+          ++stats.uplink_token_rejected;
+        }
+      }
+
       // 尝试16位扩展包类型
       if (received_bytes >= sizeof(rtp_packet_ext_t)) {
         auto *header_ext = (rtp_packet_ext_t *) mic_recv_buffer.data();
@@ -3113,6 +3277,13 @@ namespace stream {
         }
 
         if (auto mixed = mixer.mix_next_frame()) {
+          ++stats.mix_frames;
+          if (std::any_of(mixed->begin(), mixed->end(), [](std::int16_t sample) { return sample != 0; })) {
+            ++stats.non_silent_frames;
+          }
+          for (auto sample : *mixed) {
+            stats.max_sample_abs = std::max(stats.max_sample_abs, std::abs(static_cast<int>(sample)));
+          }
           const auto write_result = audio::write_mic_pcm(mixed->data(), mixed->size());
           if (write_result == 0) {
             ++stats.wasapi_backpressure_drops;

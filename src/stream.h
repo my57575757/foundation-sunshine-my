@@ -3,6 +3,7 @@
  * @brief Declarations for the streaming protocols.
  */
 #pragma once
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -202,5 +203,17 @@ namespace stream {
      */
     std::vector<session_info_t>
     get_all_sessions_info();
+
+    struct external_mic_result_t {
+      bool enabled {false};
+      std::uint32_t session_id {0};
+      std::uint16_t port {0};
+    };
+
+    external_mic_result_t
+    enable_external_mic(
+      std::string_view client_uuid,
+      const boost::asio::ip::address &client_address,
+      const std::array<std::uint8_t, 16> &token);
   }  // namespace session
 }  // namespace stream

@@ -1232,6 +1232,47 @@ namespace nvhttp {
     https_server.resource["^/rotate-display$"]["GET"] = display_control::rotate;
     https_server.resource["^/launch$"]["GET"] = [&host_audio](auto resp, auto req) { launch(host_audio, resp, req); };
     https_server.resource["^/resume$"]["GET"] = [&host_audio](auto resp, auto req) { resume(host_audio, resp, req); };
+    https_server.resource["^/mic-uplink$"]["GET"] =
+      [&is_client_paired](resp_https_t response, req_https_t request) {
+        pt::ptree tree;
+        auto g = util::fail_guard([&]() {
+          std::ostringstream data;
+          pt::write_xml(data, tree);
+          response->write(data.str());
+          response->close_connection_after_response = true;
+        });
+
+        const auto client_uuid = get_client_cert_uuid_from_request(request);
+        if (!is_client_paired(client_uuid)) {
+          tree.put("root.<xmlattr>.status_code", 401);
+          tree.put("root.<xmlattr>.query", request->path);
+          tree.put("root.<xmlattr>.status_message", "The client is not authorized.");
+          return;
+        }
+
+        std::array<std::uint8_t, 16> token {};
+        tree.put("root.<xmlattr>.status_code", 200);
+        if (RAND_bytes(token.data(), static_cast<int>(token.size())) != 1) {
+          tree.put("root.axiMicEnabled", 0);
+          return;
+        }
+
+        auto result = stream::session::enable_external_mic(
+          client_uuid, request->remote_endpoint().address(), token);
+        if (!result.enabled) {
+          tree.put("root.axiMicEnabled", 0);
+          return;
+        }
+
+        tree.put("root.axiMicEnabled", 1);
+        tree.put("root.axiMicPort", result.port);
+        tree.put("root.axiMicSessionId", result.session_id);
+        tree.put("root.axiMicCodec", "opus");
+        tree.put("root.axiMicSampleRate", 48000);
+        tree.put("root.axiMicChannels", 1);
+        tree.put("root.axiMicFrameMs", 20);
+        tree.put("root.axiMicToken", util::hex_vec(token, true));
+      };
     https_server.resource["^/cancel$"]["GET"] = cancel;
     https_server.resource["^/pcsleep$"]["GET"] = sleep;
     https_server.resource["^/supercmd$"]["GET"] = apps::exec_super_cmd;
