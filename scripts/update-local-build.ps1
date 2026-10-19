@@ -128,11 +128,16 @@ if (-not $nodeCommand) {
 $nodeDir = Split-Path -Parent $nodeCommand.Source
 
 # 本地 Tauri GUI 由 cargo 构建；缺失时 ninja 的 sunshine-control-panel 目标不会生成。
+# rustup 若以 --no-modify-path 安装，PATH 里没有 cargo，回退到用户目录下的 ~/.cargo/bin。
 $cargoCommand = Get-Command cargo.exe -ErrorAction SilentlyContinue
-if (-not $cargoCommand) {
-    Die 'PATH 中找不到 cargo.exe；本地构建控制面板需要 Rust 工具链（rustup 的 stable-x86_64-pc-windows-msvc）。'
+if ($cargoCommand) {
+    $cargoDir = Split-Path -Parent $cargoCommand.Source
+} else {
+    $cargoDir = Join-Path $env:USERPROFILE '.cargo\bin'
+    if (-not (Test-Path -LiteralPath (Join-Path $cargoDir 'cargo.exe'))) {
+        Die 'PATH 与 ~/.cargo/bin 中都找不到 cargo.exe；本地构建控制面板需要 Rust 工具链（rustup 的 stable-x86_64-pc-windows-msvc）。'
+    }
 }
-$cargoDir = Split-Path -Parent $cargoCommand.Source
 
 # 去掉 PATH 中已存在的这几个目录，避免重复或旧顺序造成遮蔽，再按固定顺序前置。
 $sep = [System.IO.Path]::PathSeparator
