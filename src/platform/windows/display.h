@@ -25,6 +25,7 @@
 #include <AMF/core/CurrentTime.h>
 
 #include "src/platform/common.h"
+#include "src/streaming/frame_rate_tracker.h"
 #include "src/platform/windows/frame_contract.h"
 #include "src/utility.h"
 #include "src/video.h"
@@ -186,6 +187,13 @@ namespace platf::dxgi {
 
   class display_base_t: public display_t {
   public:
+    std::shared_ptr<perf::capture_source_counter_t> capture_frame_counter = std::make_shared<perf::capture_source_counter_t>();
+
+    std::shared_ptr<perf::capture_source_counter_t>
+    frame_rate_source() const override {
+      return capture_frame_counter;
+    }
+
     int
     init(const ::video::config_t &config, const std::string &display_name);
 
@@ -394,14 +402,6 @@ namespace platf::dxgi {
     std::unique_ptr<amf_encode_device_t>
     make_amf_encode_device(pix_fmt_e pix_fmt, const ::video::config_t &config) override;
 
-    /**
-     * @brief Current captured SDR white level in nits. Prefer producer metadata
-     *        when VDD supplies it, otherwise query the selected Windows output.
-     *        The legacy 300-nit value is used only if neither source is available.
-     */
-    std::optional<float>
-    capture_sdr_white_nits() const;
-
     std::atomic<uint32_t> next_image_id;
 
   protected:
@@ -424,9 +424,6 @@ namespace platf::dxgi {
     gpu_cursor_t cursor_xor;
     // Written from the capture/cursor thread and used by cursor rendering.
     std::atomic<float> cursor_white_multiplier_value { 300.0f / 80.0f };
-    // Producer-reported capture white is independent of cursor rendering. Keep
-    // it separate so a cursor constant-buffer failure cannot corrupt encoding.
-    std::atomic<float> producer_sdr_white_nits { 0.0f };
     bool cursor_white_normalization_enabled = false;
     bool cursor_pipeline_ready = false;
 
@@ -462,6 +459,7 @@ namespace platf::dxgi {
    */
   class duplication_t {
   public:
+    std::shared_ptr<perf::capture_source_counter_t> frame_counter;
     dup_t dup;
     bool has_frame {};
     bool local_cursor_mode_was_active {};
@@ -527,6 +525,7 @@ namespace platf::dxgi {
    * Display duplicator that uses the Windows.Graphics.Capture API.
    */
   class wgc_capture_t {
+    std::shared_ptr<perf::capture_source_counter_t> frame_counter;
     winrt::Windows::Graphics::DirectX::Direct3D11::IDirect3DDevice uwp_device { nullptr };
     winrt::Windows::Graphics::Capture::GraphicsCaptureItem item { nullptr };
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFramePool frame_pool { nullptr };
@@ -666,6 +665,8 @@ namespace platf::dxgi {
      */
     int
     init(ID3D11Device *d3d_device, unsigned int monitor_idx);
+
+    std::shared_ptr<perf::capture_source_counter_t> frame_rate_counter;
 
     /**
      * @brief Wait for the next frame (event-driven, no polling).

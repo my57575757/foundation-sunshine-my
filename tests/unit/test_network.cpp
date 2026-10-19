@@ -8,6 +8,27 @@
 
 struct MdnsInstanceNameTest: testing::TestWithParam<std::tuple<std::string, std::string>> {};
 
+TEST(ListenerValidation, RejectsInvalidNonLocalOrMismatchedAddresses) {
+  EXPECT_NO_THROW(net::validate_bind_address("", "ipv4"));
+  EXPECT_NO_THROW(net::validate_bind_address("127.0.0.1", "both"));
+  EXPECT_THROW(net::validate_bind_address("192.168.1.0/24", "ipv4"), std::invalid_argument);
+  EXPECT_THROW(net::validate_bind_address("::1", "ipv4"), std::invalid_argument);
+  EXPECT_THROW(net::validate_bind_address("203.0.113.254", "ipv4"), std::invalid_argument);
+  EXPECT_THROW(net::validate_bind_address("127.0.0.1", "ipv6"), std::invalid_argument);
+}
+
+TEST(ListenerValidation, EnumeratesRealLocalAddressesIncludingLoopback) {
+  const auto addresses = net::local_addresses();
+  ASSERT_FALSE(addresses.empty());
+  bool loopback = false;
+  for (const auto &entry : addresses) {
+    const auto address = boost::asio::ip::make_address(entry.address);
+    loopback = loopback || address.is_loopback();
+    EXPECT_FALSE(entry.name.empty());
+  }
+  EXPECT_TRUE(loopback);
+}
+
 TEST_P(MdnsInstanceNameTest, Run) {
   auto [input, expected] = GetParam();
   ASSERT_EQ(net::mdns_instance_name(input), expected);
@@ -78,6 +99,13 @@ TEST_F(BindAddressTest, ConfiguredIPv4Address) {
   ASSERT_EQ(bind_addr, "192.168.1.100");
 }
 
+TEST_F(BindAddressTest, ConcreteIPv4UsesIPv4SocketsEvenWithDualStackConfigured) {
+  config::sunshine.bind_address = "127.0.0.1";
+  EXPECT_TRUE(net::bind_uses_ipv4(net::BOTH));
+  config::sunshine.bind_address.clear();
+  EXPECT_FALSE(net::bind_uses_ipv4(net::BOTH));
+}
+
 /**
  * @brief Test that get_bind_address returns configured IPv6 address
  */
@@ -137,6 +165,30 @@ TEST_F(BindAddressTest, LinkLocalAddresses) {
 TEST_F(BindAddressTest, WildcardAddressFunction) {
   ASSERT_EQ(net::af_to_any_address_string(net::af_e::IPV4), "0.0.0.0");
   ASSERT_EQ(net::af_to_any_address_string(net::af_e::BOTH), "::");
+}
+
+TEST_F(BindAddressTest, WebUiHostUsesPanelLoopbackForConfiguredAddresses) {
+  config::sunshine.bind_address = "192.0.2.10";
+  EXPECT_EQ(net::get_web_ui_host(), "127.0.0.1");
+
+  config::sunshine.bind_address = "2001:db8::10";
+  EXPECT_EQ(net::get_web_ui_host(), "127.0.0.1");
+}
+
+TEST_F(BindAddressTest, WebUiHostUsesLoopbackForEmptyAndWildcardAddresses) {
+  config::sunshine.bind_address.clear();
+  EXPECT_EQ(net::get_web_ui_host(), "localhost");
+
+  config::sunshine.bind_address = "0.0.0.0";
+  EXPECT_EQ(net::get_web_ui_host(), "127.0.0.1");
+
+  config::sunshine.bind_address = "::";
+  EXPECT_EQ(net::get_web_ui_host(), "127.0.0.1");
+}
+
+TEST_F(BindAddressTest, WebUiHostKeepsHistoricalHostForInvalidConfiguredAddress) {
+  config::sunshine.bind_address = "not-an-ip";
+  EXPECT_EQ(net::get_web_ui_host(), "localhost");
 }
 
 TEST(AddressNormalizationTest, ConvertsIpv4MappedIpv6ToIpv4) {

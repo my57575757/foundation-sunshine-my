@@ -44,6 +44,10 @@ struct AVHWFramesContext;
 struct AVCodecContext;
 struct AVDictionary;
 
+namespace perf {
+  struct capture_source_counter_t;
+}
+
 #ifdef _WIN32
 // Forward declarations of boost classes to avoid having to include boost headers
 // here, which results in issues with Windows.h and WinSock2.h include order.
@@ -333,7 +337,7 @@ namespace platf {
     constexpr caps_t touchpad_frame = 0x20;  // Native precision touchpad frame events
     constexpr caps_t cursor_shape = 0x40;  // Client-rendered cursor shape updates
     constexpr caps_t ds5_haptics_pcm = 0x80;  // Native DualSense authored haptics PCM
-    constexpr caps_t dynamic_sdr_white = 0x100;  // Runtime client SDR reference white updates
+    constexpr caps_t dynamic_sdr_white = 0x100;  // Reserved legacy SDR white updates; never advertised
     constexpr caps_t remote_text_context = 0x200;  // InputPane/UIA text context updates
   };  // namespace platform_caps
 
@@ -445,6 +449,7 @@ namespace platf {
     float pressureOrDistance;  // Distance for hover and pressure for contact
     float contactAreaMajor;
     float contactAreaMinor;
+    std::uint16_t barrelRoll = 0xffff;  // Independent axial twist, or unknown
   };
 
   class deinit_t {
@@ -458,6 +463,9 @@ namespace platf {
     std::optional<std::chrono::steady_clock::time_point> convert_end;
     std::optional<std::chrono::steady_clock::time_point> encode_submit;
     std::optional<std::chrono::steady_clock::time_point> packet_ready;
+    // The existing performance recorder uses this bit to count PyroWave
+    // frames without adding a second per-frame instrumentation path.
+    bool pyrowave = false;
   };
 
   struct img_t: std::enable_shared_from_this<img_t> {
@@ -549,11 +557,6 @@ namespace platf {
 
     virtual int
     convert(platf::img_t &img) = 0;
-
-    // Optional: supported HDR converters can apply this at a frame boundary.
-    virtual void
-    set_client_sdr_white_nits(float) {
-    }
 
     // Packet-level confirmation, independent of the PQ/HLG transfer function.
     virtual void report_dolby_vision_output(bool injected, bool enabled) {}
@@ -671,6 +674,12 @@ namespace platf {
      */
     using pull_free_image_cb_t = std::function<bool(std::shared_ptr<img_t> &img_out)>;
 
+    // Optional raw-source telemetry, shared by sessions using this display.
+    virtual std::shared_ptr<perf::capture_source_counter_t>
+    frame_rate_source() const {
+      return {};
+    }
+
     display_t() noexcept:
         offset_x { 0 },
         offset_y { 0 } {
@@ -787,8 +796,36 @@ namespace platf {
     virtual int
     set_sink(const std::string &sink) = 0;
 
+    /**
+     * @brief Restore the previous sink only when this controller still owns the default sink.
+     * @param sink Sink to restore.
+     * @returns True when the platform handled the decision, including skipping restoration
+     *          because the user selected another default sink; false when the platform has
+     *          no ownership-aware implementation.
+     */
+    virtual bool
+    restore_sink_if_assigned(const std::string &sink) {
+      return false;
+    }
+
+    virtual bool
+    has_assigned_sink() {
+      return false;
+    }
+
     virtual std::unique_ptr<mic_t>
     microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, bool continuous) = 0;
+
+    /**
+     * @brief Create a capture client for a selected sink.
+     * @param sink Sink to capture. An empty sink follows the current default device.
+     * @returns The capture client, or null on failure. Platforms without explicit sink
+     *          capture can fall back to their default microphone implementation.
+     */
+    virtual std::unique_ptr<mic_t>
+    microphone(const std::uint8_t *mapping, int channels, std::uint32_t sample_rate, std::uint32_t frame_size, bool continuous, const std::string &sink) {
+      return microphone(mapping, channels, sample_rate, frame_size, continuous);
+    }
 
     /**
      * @brief Check if the audio sink is available in the system.
@@ -797,6 +834,16 @@ namespace platf {
      */
     virtual bool
     is_sink_available(const std::string &sink) = 0;
+
+    /**
+     * @brief Check if a virtual sink supports the channel layout encoded in its name.
+     * @param sink Sink to be checked, as returned by sink_info().
+     * @returns False only when the platform knows the layout is unsupported.
+     */
+    virtual bool
+    is_sink_format_supported(const std::string &sink) {
+      return true;
+    }
 
     virtual std::optional<sink_t>
     sink_info() = 0;

@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "hdr/client_display_capabilities.h"
+#include "streaming/bitrate.h"
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -115,7 +116,7 @@ namespace video {
     VBV_BUFFER_SIZE,   // VBV缓冲区大小 - 值：1个int
     // Wire value 9; keep this explicit because the enum ordinal is part of the
     // Sunshine dynamic-parameter control protocol.
-    CLIENT_SDR_WHITE_NITS = 9, // 客户端 SDR reference white - 值：1个float (nits)
+    CLIENT_SDR_WHITE_NITS = 9, // Reserved legacy wire ID; ignored, never reuse
     MAX_PARAM_TYPE
   };
 
@@ -201,6 +202,10 @@ namespace video {
     platf::pre_encode_filter_e pre_encode_filter = platf::pre_encode_filter_e::none;
     platf::pre_encode_filter_config_t pre_encode_filter_config;
     boost::shared_ptr<const image_enhancement::backend_use_t> enhancement_backend;
+    // Local diagnostics only; never serialized into the media protocol.
+    std::uint32_t perf_session_id = 0;
+    bool pyrowave_dynamic_hdr_mapping = false;
+    std::shared_ptr<streaming::bitrate_budget_t> bitrate_budget;
 
     platf::frame_pipeline_policy_t
     effective_frame_pipeline_policy() const {
@@ -218,6 +223,10 @@ namespace video {
       return static_cast<double>(framerate);
     }
   };
+
+  // Resolve source mastering metadata after optional HDR pixel processing.
+  bool
+  get_effective_hdr_metadata(platf::display_t *display, const config_t &config, SS_HDR_METADATA &metadata);
 
   // Convert a total video transport budget (including FEC) to encoder bitrate.
   int
@@ -433,6 +442,8 @@ namespace video {
   struct encode_session_t {
     virtual ~encode_session_t() = default;
 
+    std::uint32_t perf_session_id = 0;
+
     virtual int
     convert(platf::img_t &img) = 0;
 
@@ -445,11 +456,19 @@ namespace video {
     virtual void
     invalidate_ref_frames(int64_t first_frame, int64_t last_frame) = 0;
 
-    virtual void
-    set_bitrate(int bitrate_kbps) = 0;  // 新增：动态码率调整方法
+    // Accepts an encoder target; transport/FEC allocation happens once upstream.
+    virtual bool
+    set_bitrate(int bitrate_kbps) = 0;
+
+    std::shared_ptr<streaming::bitrate_budget_t> bitrate_budget;
 
     virtual void
     set_dynamic_param(const dynamic_param_t &param) = 0;  // 新增：通用动态参数调整方法
+
+    unsigned
+    fec_percentage() const {
+      return bitrate_budget ? bitrate_budget->applied().fec_percentage : 0;
+    }
   };
 
   // encoders
@@ -500,6 +519,7 @@ namespace video {
     std::vector<replace_t> *replacements = nullptr;
     void *channel_data = nullptr;
     bool after_ref_frame_invalidation = false;
+    unsigned fec_percentage = 0;  // Protection budget when this frame was submitted.
     std::optional<std::chrono::steady_clock::time_point> frame_timestamp;
     std::optional<platf::frame_pipeline_trace_t> pipeline_trace;
   };
@@ -623,24 +643,13 @@ namespace video {
   std::string
   active_encoder_name();
 
-  /**
-   * @brief Whether the selected encoder path can apply runtime SDR white updates.
-   */
-  bool
-  active_encoder_supports_dynamic_sdr_white();
-
-  /**
-   * @brief Validate a client SDR reference white value from the control stream.
-   */
-  bool
-  is_valid_client_sdr_white_nits(float nits);
-
   void
   capture(
     safe::mail_t mail,
     config_t config,
     void *channel_data,
-    std::optional<safe::mail_raw_t::event_t<dynamic_param_t>> dynamic_param_events = std::nullopt);
+    std::optional<safe::mail_raw_t::event_t<dynamic_param_t>> dynamic_param_events = std::nullopt,
+    int packet_size = 0);
 
   bool
   validate_encoder(

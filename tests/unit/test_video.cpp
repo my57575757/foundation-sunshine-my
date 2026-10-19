@@ -123,33 +123,30 @@ TEST(HlgSystemGamma, FallsBackToReferencePeakForInvalidValues) {
   EXPECT_NEAR(video::hlg_system_gamma(std::numeric_limits<float>::quiet_NaN()), 1.2f, 0.00001f);
 }
 
-TEST(DynamicSdrWhite, AcceptsOnlyFiniteValuesWithinProtocolRange) {
-  EXPECT_FALSE(video::is_valid_client_sdr_white_nits(49.0f));
-  EXPECT_TRUE(video::is_valid_client_sdr_white_nits(50.0f));
-  EXPECT_TRUE(video::is_valid_client_sdr_white_nits(1000.0f));
-  EXPECT_FALSE(video::is_valid_client_sdr_white_nits(1001.0f));
-  EXPECT_FALSE(video::is_valid_client_sdr_white_nits(std::numeric_limits<float>::quiet_NaN()));
-  EXPECT_FALSE(video::is_valid_client_sdr_white_nits(std::numeric_limits<float>::infinity()));
-}
-
 TEST(VideoBitrate, ConvertsTotalBitrateToEncoderBitrate) {
-  EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, 10), 45000);
-  EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, 80), 10000);
+  EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, 10), 45454);
+  EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, 80), 27777);
   EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, 0), 50000);
   EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, -1), 50000);
-  EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, 81), 50000);
+  EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, 81), 27624);
+  EXPECT_EQ(video::encoder_bitrate_from_total_bitrate(50000, 100), 25000);
 }
 
 TEST(VideoBitrate, ConvertsCappedTotalRequestToEncoderBitrate) {
-  EXPECT_EQ(video::encoder_bitrate_for_total_request(90000, 0, 10), 81000);
-  EXPECT_EQ(video::encoder_bitrate_for_total_request(90000, 50000, 10), 45000);
-  EXPECT_EQ(video::encoder_bitrate_for_total_request(40000, 50000, 10), 36000);
+  EXPECT_EQ(video::encoder_bitrate_for_total_request(90000, 0, 10), 81818);
+  EXPECT_EQ(video::encoder_bitrate_for_total_request(90000, 50000, 10), 45454);
+  EXPECT_EQ(video::encoder_bitrate_for_total_request(40000, 50000, 10), 36363);
 }
 
 TEST(VideoBitrate, CapsInitialEncoderBitrateUsingTotalBitrateLimit) {
   EXPECT_EQ(video::cap_initial_encoder_bitrate(90000, 0, 10), 90000);
-  EXPECT_EQ(video::cap_initial_encoder_bitrate(90000, 50000, 10), 45000);
+  EXPECT_EQ(video::cap_initial_encoder_bitrate(90000, 50000, 10), 45454);
   EXPECT_EQ(video::cap_initial_encoder_bitrate(40000, 50000, 10), 40000);
+}
+
+TEST(VideoBitrate, PyrowaveUsesHostCapWithoutLegacyRtpFecConversion) {
+  EXPECT_EQ(video::cap_initial_encoder_bitrate(90000, 50000, 0), 50000);
+  EXPECT_EQ(video::encoder_bitrate_for_total_request(90000, 50000, 0), 50000);
 }
 
 TEST(HdrPipelineStatus, LiveNrRequestsAreScopedAndSurviveStaleStatusPublication) {

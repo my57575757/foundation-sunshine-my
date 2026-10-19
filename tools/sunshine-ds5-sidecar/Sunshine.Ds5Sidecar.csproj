@@ -10,16 +10,21 @@
   </PropertyGroup>
   <Target Name="RequireHIDMaestro" BeforeTargets="ResolveReferences"
           Condition="!Exists('$(HIDMaestroCorePath)')">
-    <Error Text="HIDMaestro.Core.dll was not found. Set HIDMaestroCorePath to the pinned upstream v1.7.3 runtime." />
+    <Error Text="HIDMaestro.Core.dll was not found. Build the Foundation v1.12.0 Core patch and set HIDMaestroCorePath to its output." />
   </Target>
   <ItemGroup>
+    <!-- Input arrives in short bursts separated by about 1 ms. The pinned
+         .NET 10 portable pool's default semaphore spin budget burns CPU
+         between those bursts. Sleep on the signal instead; this does not
+         throttle input or change timer resolution. -->
+    <RuntimeHostConfigurationOption Include="System.Threading.ThreadPool.UnfairSemaphoreSpinLimit" Value="0" />
     <Reference Include="HIDMaestro.Core">
       <HintPath>$(HIDMaestroCorePath)</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>
   <ItemGroup>
-    <!-- Upstream v1.6.2 USB DualSense profiles with extendedReport.alwaysArmed
+    <!-- Native USB DualSense profiles with extendedReport.alwaysArmed
          added. The stock profiles never arm the vendor-blob encoder, so the
          Sony-specific tail of report 0x01 (touch fingers at bytes 33/37 among
          others) is never written and idles at 0x00, which every raw consumer
@@ -28,6 +33,5 @@
          hardware behaviour. -->
     <EmbeddedResource Include="profiles\dualsense.json" LogicalName="Sunshine.Ds5Sidecar.profiles.dualsense.json" />
     <EmbeddedResource Include="profiles\dualsense-composite.json" LogicalName="Sunshine.Ds5Sidecar.profiles.dualsense-composite.json" />
-    <EmbeddedResource Include="profiles\dualsense-hidonly.json" LogicalName="Sunshine.Ds5Sidecar.profiles.dualsense-hidonly.json" />
   </ItemGroup>
 </Project>

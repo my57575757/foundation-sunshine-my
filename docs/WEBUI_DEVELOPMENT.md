@@ -576,7 +576,7 @@ trackEvents.gpuReported({ platform: 'windows', adapters: [...] })
 - `vue` - Vue 3 框架
 - `vue-i18n` - 国际化（Composition API 模式）
 - `bootstrap` - UI 框架
-- `vuedraggable` - 拖拽功能
+- `vuedraggable-es` - 拖拽功能
 - `marked` - Markdown 解析
 
 ## 🐛 调试技巧
@@ -590,8 +590,8 @@ trackEvents.gpuReported({ platform: 'windows', adapters: [...] })
 
 ### Vite 配置
 
-- **开发配置**: `vite.dev.config.js` - 开发环境专用配置
-- **生产配置**: `vite.config.js` - 生产构建配置
+- **开发配置**: `scripts/vite/vite.dev.config.js` - 开发环境专用配置
+- **生产配置**: `scripts/vite/vite.config.js` - 生产构建配置
 - **EJS模板**: 支持HTML模板预处理
 - **路径别名**: 配置了Vue和Bootstrap的路径别名
 - **Rolldown支持**: 使用 Rolldown 作为实验性打包器（更快）
